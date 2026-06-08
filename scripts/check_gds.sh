@@ -9,7 +9,7 @@
 #
 # If no mountpoint is specified, checks platform-level requirements only.
 
-set -e
+set -o pipefail  # catch failures inside pipelines
 
 MOUNTPOINT="${1:-}"
 
@@ -56,11 +56,11 @@ echo "─── GPU ───"
 if check_cmd nvidia-smi; then
     pass "nvidia-smi available"
 
-    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
-    echo "       GPU: $GPU_NAME"
+    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || true)
+    echo "       GPU: ${GPU_NAME:-unknown}"
 
-    CC=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1)
-    CC_MAJOR=$(echo "$CC" | cut -d. -f1)
+    CC=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 || true)
+    CC_MAJOR=$(echo "${CC:-0}" | cut -d. -f1)
     if [ "$CC_MAJOR" -ge 6 ]; then
         pass "Compute Capability $CC (≥ 6.0 required)"
     else
@@ -68,8 +68,8 @@ if check_cmd nvidia-smi; then
              "GDS requires Pascal (SM 6.0) or newer GPU"
     fi
 
-    DRV_VER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)
-    DRV_MAJOR=$(echo "$DRV_VER" | cut -d. -f1)
+    DRV_VER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || true)
+    DRV_MAJOR=$(echo "${DRV_VER:-0}" | cut -d. -f1)
     if [ "$DRV_MAJOR" -ge 470 ]; then
         pass "Driver version $DRV_VER (≥ 470.57 required)"
     else
@@ -142,7 +142,7 @@ NVME_COUNT=$(lspci 2>/dev/null | grep -ci "Non-Volatile" || echo 0)
 if [ "$NVME_COUNT" -gt 0 ]; then
     pass "$NVME_COUNT NVMe device(s) found"
 
-    lspci | grep "Non-Volatile" | while read -r line; do
+    lspci 2>/dev/null | grep "Non-Volatile" | while read -r line; do
         BDF=$(echo "$line" | awk '{print $1}')
         echo "       $BDF: $line"
 
@@ -152,7 +152,7 @@ if [ "$NVME_COUNT" -gt 0 ]; then
             WIDTH=$(cat "/sys/bus/pci/devices/0000:$BDF/current_link_width" 2>/dev/null || echo "unknown")
             echo "             PCIe $SPEED x$WIDTH"
         fi
-    done
+    done || true
 else
     fail "No NVMe devices found via lspci" \
          "NVMe PCIe SSD required for GDS"
@@ -165,8 +165,8 @@ echo ""
 echo "─── PCIe Topology & ACS ───"
 
 # Check PCIe topology: GPU and NVMe on same root complex
-GPU_BDF_LIST=$(lspci 2>/dev/null | grep -i "VGA\|3D\|Display" | grep -i nvidia | awk '{print $1}')
-NVME_BDF_LIST=$(lspci 2>/dev/null | grep "Non-Volatile" | awk '{print $1}')
+GPU_BDF_LIST=$(lspci 2>/dev/null | grep -i "VGA\|3D\|Display" | grep -i nvidia | awk '{print $1}' || true)
+NVME_BDF_LIST=$(lspci 2>/dev/null | grep "Non-Volatile" | awk '{print $1}' || true)
 
 if [ -n "$GPU_BDF_LIST" ] && [ -n "$NVME_BDF_LIST" ]; then
     echo "       GPUs found:  $(echo $GPU_BDF_LIST | wc -w | tr -d ' ')"
