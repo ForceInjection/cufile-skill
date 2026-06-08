@@ -1,0 +1,47 @@
+# Build artifacts
+build/
+*.o
+*.obj
+*.exe
+*.out
+
+# CUDA build artifacts
+*.ptx
+*.cubin
+*.fatbin
+*.module_id
+
+# Compiled examples
+examples/01-driver-init
+examples/02-sync-read-write
+examples/03-async-read-write
+examples/04-batch-io
+examples/05-end-to-end-pipeline
+examples/06-alignment-check
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# nvidia-fs / GDS artifacts
+.nfs*
+*.nfs*
+
+# Test files (created by running examples)
+gds_test_*
+testfile*
+*.bin.output
+
+# Claude Code
+.claude/
+
+# Editor backup files
+*.bak
+*.orig
