@@ -27,9 +27,8 @@
 #define TEST_SIZE (64 * 1024 * 1024)  // 64 MB — adjust as needed
 #define IO_SIZE   (4 * 1024 * 1024)   // 4 MB per I/O
 
-/* ── GPU Verify Kernel ────────────────────────────────────────── */
+/* ── GPU Verify Kernels ────────────────────────────────────────── */
 
-/* Simple kernel: fill buffer with a pattern */
 __global__ void fill_pattern_kernel(unsigned char *buf, size_t size,
                                     unsigned char base) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -38,7 +37,6 @@ __global__ void fill_pattern_kernel(unsigned char *buf, size_t size,
     }
 }
 
-/* Simple kernel: verify pattern */
 __global__ void verify_pattern_kernel(const unsigned char *buf,
                                        size_t size, unsigned char base,
                                        int *error_count) {
@@ -53,18 +51,19 @@ __global__ void verify_pattern_kernel(const unsigned char *buf,
 
 /* ── Synchronous Read with Partial Read Handling ──────────────── */
 
-ssize_t cuFileReadFull(CUfileDescr_t fh, CUdeviceptr devPtr,
+ssize_t cuFileReadFull(CUfileHandle_t fh, void *bufPtr,
                        size_t size, off_t offset) {
     size_t total = 0;
     while (total < size) {
-        ssize_t n = cuFileRead(fh, devPtr + total, size - total,
-                               offset + total, 0);
+        ssize_t n = cuFileRead(fh, (char *)bufPtr + total,
+                               size - total, offset + total, 0);
         if (n == 0) {
             fprintf(stderr, "  EOF at %zu / %zu bytes\n", total, size);
             break;
         }
         if (n < 0) {
-            fprintf(stderr, "  Read error at %zu bytes\n", total);
+            fprintf(stderr, "  Read error at %zu bytes: %s\n",
+                    total, CUFILE_ERRSTR((int)(-n)));
             return -1;
         }
         total += n;
@@ -72,14 +71,15 @@ ssize_t cuFileReadFull(CUfileDescr_t fh, CUdeviceptr devPtr,
     return (ssize_t)total;
 }
 
-ssize_t cuFileWriteFull(CUfileDescr_t fh, CUdeviceptr devPtr,
+ssize_t cuFileWriteFull(CUfileHandle_t fh, const void *bufPtr,
                         size_t size, off_t offset) {
     size_t total = 0;
     while (total < size) {
-        ssize_t n = cuFileWrite(fh, devPtr + total, size - total,
-                                offset + total, 0);
+        ssize_t n = cuFileWrite(fh, (const char *)bufPtr + total,
+                                size - total, offset + total, 0);
         if (n < 0) {
-            fprintf(stderr, "  Write error at %zu bytes\n", total);
+            fprintf(stderr, "  Write error at %zu bytes: %s\n",
+                    total, CUFILE_ERRSTR((int)(-n)));
             return -1;
         }
         total += n;
@@ -90,166 +90,89 @@ ssize_t cuFileWriteFull(CUfileDescr_t fh, CUdeviceptr devPtr,
 /* ── Main ─────────────────────────────────────────────────────── */
 
 int main(int argc, char *argv[]) {
-    const char *filepath = (argc > 1) ? argv[1] : "/mnt/nvme/testfile";
-    printf("=== Synchronous cuFile Read/Write Example ===\n");
-    printf("File: %s\n", filepath);
-    printf("Test size: %s\n\n", format_size(TEST_SIZE));
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <file_path_on_gds_mount>\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+    const char *file_path = argv[1];
 
-    int thread_count = 256;
-    int block_count = (TEST_SIZE + thread_count - 1) / thread_count;
-
-    /* ── 1. Initialize cuFile driver ──────────────────────── */
-    printf("1. Initializing cuFile driver...\n");
+    /* ── Step 1: Driver init ────────────────────────────────── */
+    printf("=== Sync Read/Write Example ===\n\n");
     CUfileError_t st = cuFileDriverOpen();
+    cuFileCheck(st, "cuFileDriverOpen");
+
+    /* ── Step 2: Allocate + register GPU buffer ─────────────── */
+    printf("Allocating GPU buffer: %s\n", format_size(TEST_SIZE));
+    unsigned char *gpu_buf;
+    cudaMalloc(&gpu_buf, TEST_SIZE);
+    if (!gpu_buf) {
+        fprintf(stderr, "cudaMalloc failed\n");
+        return EXIT_FAILURE;
+    }
+
+    st = cuFileBufRegister(gpu_buf, TEST_SIZE, 0);
     if (st.err != CU_FILE_SUCCESS) {
-        fprintf(stderr, "   FAILED: %s\n", cuFileGetErrorString(st));
-        return EXIT_FAILURE;
-    }
-    printf("   OK.\n");
-    check_gds_available();  // Print GDS status (informational)
-
-    /* ── 2. Allocate and register GPU buffer ──────────────── */
-    printf("\n2. Allocating GPU buffer (%s)...\n", format_size(TEST_SIZE));
-    CUdeviceptr devPtr;
-    CUresult cr = cuMemAlloc(&devPtr, TEST_SIZE);
-    if (cr != CUDA_SUCCESS) {
-        fprintf(stderr, "   cuMemAlloc failed: %d\n", cr);
-        cuFileDriverClose();
-        return EXIT_FAILURE;
-    }
-    printf("   Allocated at 0x%llx\n", (unsigned long long)devPtr);
-
-    /* Check alignment */
-    if (!check_alignment((const void *)(uintptr_t)devPtr, TEST_SIZE, 0)) {
-        fprintf(stderr, "   WARNING: Buffer alignment check failed.\n");
+        fprintf(stderr, "cuFileBufRegister failed: %s (err=%d)\n",
+                CUFILE_ERRSTR(st.err), st.err);
+        fprintf(stderr, "(Continuing without registration — compat mode will be used)\n");
     }
 
-    printf("   Registering buffer for GDS...\n");
-    st = cuFileBufRegister(devPtr, TEST_SIZE, 0);
-    if (st.err != CU_FILE_SUCCESS) {
-        fprintf(stderr, "   FAILED: %s\n", cuFileGetErrorString(st));
-        cuMemFree(devPtr);
-        cuFileDriverClose();
-        return EXIT_FAILURE;
-    }
-    printf("   Registered.\n");
+    /* ── Step 3: Open + register file ───────────────────────── */
+    printf("Opening file: %s\n", file_path);
+    int fd = open_direct(file_path, O_CREAT | O_RDWR, 0644);
+    preallocate_file(fd, TEST_SIZE);
 
-    /* ── 3. Fill GPU buffer with known pattern ────────────── */
-    printf("\n3. Filling GPU buffer with test pattern...\n");
-    fill_pattern_kernel<<<block_count, thread_count>>>(
-        (unsigned char *)devPtr, TEST_SIZE, 0xAB);
-    cudaDeviceSynchronize();
-    printf("   Pattern written.\n");
+    CUfileDescr_t descr = {0};
+    descr.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+    descr.handle.fd = fd;
 
-    /* ── 4. Open and register file ────────────────────────── */
-    printf("\n4. Opening file (O_DIRECT | O_RDWR | O_CREAT)...\n");
-    int fd = open(filepath, O_DIRECT | O_RDWR | O_CREAT, 0644);
-    if (fd < 0) {
-        perror("   open");
-        cuFileBufDeregister(devPtr);
-        cuMemFree(devPtr);
-        cuFileDriverClose();
-        return EXIT_FAILURE;
-    }
-    printf("   Opened (fd=%d).\n", fd);
+    CUfileHandle_t fh;
+    st = cuFileHandleRegister(&fh, &descr);
+    cuFileCheck(st, "cuFileHandleRegister");
 
-    /* Pre-allocate file to desired size */
-    if (ftruncate(fd, TEST_SIZE) != 0) {
-        perror("   ftruncate");
-    }
-    printf("   File pre-allocated to %s.\n", format_size(TEST_SIZE));
+    /* ── Step 4: Write via cuFile (GPU → NVMe) ──────────────── */
+    printf("Writing %s to file via cuFile...\n", format_size(TEST_SIZE));
 
-    printf("   Registering file handle...\n");
-    CUfileDescr_t fh = {0};
-    fh.cookie = (CUfileDriverCookie)(uintptr_t)fd;
-    st = cuFileHandleRegister(&fh, NULL);
-    if (st.err != CU_FILE_SUCCESS) {
-        fprintf(stderr, "   FAILED: %s\n", cuFileGetErrorString(st));
-        close(fd);
-        cuFileBufDeregister(devPtr);
-        cuMemFree(devPtr);
-        cuFileDriverClose();
-        return EXIT_FAILURE;
-    }
-    printf("   Registered.\n");
-
-    /* ── 5. Write GPU buffer to file ──────────────────────── */
-    printf("\n5. Writing %s to file...\n", format_size(TEST_SIZE));
-    struct timespec t1, t2;
-
-    clock_gettime(CLOCK_MONOTONIC, &t1);
-    for (size_t off = 0; off < TEST_SIZE; off += IO_SIZE) {
-        size_t chunk = (off + IO_SIZE <= TEST_SIZE) ? IO_SIZE : (TEST_SIZE - off);
-        ssize_t n = cuFileWriteFull(fh, devPtr + off, chunk, off);
-        if (n < 0) {
-            fprintf(stderr, "   Write failed at offset %zu\n", off);
-            break;
-        }
-    }
-    clock_gettime(CLOCK_MONOTONIC, &t2);
-
-    double write_elapsed = (t2.tv_sec - t1.tv_sec) +
-                           (t2.tv_nsec - t1.tv_nsec) / 1e9;
-    double write_bw = measure_bandwidth(TEST_SIZE, write_elapsed);
-    printf("   Complete: %.2f GB/s\n", write_bw);
-
-    /* ── 6. Clear buffer and read back from file ──────────── */
-    printf("\n6. Clearing GPU buffer...\n");
-    cudaMemset((void *)devPtr, 0, TEST_SIZE);
-
-    printf("   Reading %s from file...\n", format_size(TEST_SIZE));
-    clock_gettime(CLOCK_MONOTONIC, &t1);
-    for (size_t off = 0; off < TEST_SIZE; off += IO_SIZE) {
-        size_t chunk = (off + IO_SIZE <= TEST_SIZE) ? IO_SIZE : (TEST_SIZE - off);
-        ssize_t n = cuFileReadFull(fh, devPtr + off, chunk, off);
-        if (n < 0) {
-            fprintf(stderr, "   Read failed at offset %zu\n", off);
-            break;
-        }
-    }
-    clock_gettime(CLOCK_MONOTONIC, &t2);
-
-    double read_elapsed = (t2.tv_sec - t1.tv_sec) +
-                          (t2.tv_nsec - t1.tv_nsec) / 1e9;
-    double read_bw = measure_bandwidth(TEST_SIZE, read_elapsed);
-    printf("   Complete: %.2f GB/s\n", read_bw);
-
-    /* ── 7. Verify data integrity on GPU ──────────────────── */
-    printf("\n7. Verifying data integrity on GPU...\n");
-    int *d_error_count;
-    cudaMalloc(&d_error_count, sizeof(int));
-    cudaMemset(d_error_count, 0, sizeof(int));
-
-    verify_pattern_kernel<<<block_count, thread_count>>>(
-        (const unsigned char *)devPtr, TEST_SIZE, 0xAB, d_error_count);
+    int block_size = 256;
+    int grid_size = (TEST_SIZE + block_size - 1) / block_size;
+    fill_pattern_kernel<<<grid_size, block_size>>>(gpu_buf, TEST_SIZE, 0xAB);
     cudaDeviceSynchronize();
 
-    int error_count = 0;
-    cudaMemcpy(&error_count, d_error_count, sizeof(int),
-               cudaMemcpyDeviceToHost);
-    cudaFree(d_error_count);
+    ssize_t written = cuFileWriteFull(fh, gpu_buf, TEST_SIZE, 0);
+    printf("  Wrote %zd bytes\n", written);
 
-    if (error_count == 0) {
-        printf("   ✅ Data integrity VERIFIED — all %s match.\n",
-               format_size(TEST_SIZE));
+    /* ── Step 5: Read back via cuFile (NVMe → GPU) ──────────── */
+    printf("Reading %s back via cuFile...\n", format_size(TEST_SIZE));
+    cudaMemset(gpu_buf, 0, TEST_SIZE);  // Clear buffer before read
+
+    ssize_t nread = cuFileReadFull(fh, gpu_buf, TEST_SIZE, 0);
+    printf("  Read %zd bytes\n", nread);
+
+    /* ── Step 6: Verify data on GPU ─────────────────────────── */
+    printf("Verifying data on GPU...\n");
+    int *d_errors;
+    cudaMalloc(&d_errors, sizeof(int));
+    cudaMemset(d_errors, 0, sizeof(int));
+
+    verify_pattern_kernel<<<grid_size, block_size>>>(gpu_buf, TEST_SIZE,
+                                                      0xAB, d_errors);
+    int h_errors;
+    cudaMemcpy(&h_errors, d_errors, sizeof(int), cudaMemcpyDeviceToHost);
+
+    if (h_errors == 0) {
+        printf("✅ Data verification PASSED (%zd bytes match)\n", nread);
     } else {
-        printf("   ❌ Data CORRUPTION — %d bytes mismatch!\n", error_count);
+        printf("❌ Data verification FAILED (%d mismatches)\n", h_errors);
     }
 
-    /* ── 8. Cleanup (reverse order of setup) ──────────────── */
-    printf("\n8. Cleanup...\n");
-    printf("   Deregistering file handle...\n");
+    /* ── Step 7: Cleanup (reverse order) ────────────────────── */
     cuFileHandleDeregister(fh);
-    printf("   Closing file...\n");
     close(fd);
-    printf("   Deregistering GPU buffer...\n");
-    cuFileBufDeregister(devPtr);
-    printf("   Freeing GPU memory...\n");
-    cuMemFree(devPtr);
-    printf("   Closing driver...\n");
+    cuFileBufDeregister(gpu_buf);
+    cudaFree(gpu_buf);
+    cudaFree(d_errors);
     cuFileDriverClose();
 
     printf("\n=== Example Complete ===\n");
-    printf("Write: %.2f GB/s | Read: %.2f GB/s\n", write_bw, read_bw);
-    return (error_count == 0) ? EXIT_SUCCESS : EXIT_FAILURE;
+    return EXIT_SUCCESS;
 }

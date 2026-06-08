@@ -4,7 +4,7 @@
  * Demonstrates:
  *   1. cuFileDriverOpen() — initialize the GDS driver
  *   2. cuFileDriverGetProperties() — query driver version and GDS capabilities
- *   3. Interpreting GDS status (capable vs enabled)
+ *   3. Interpreting GDS status via nvfs.dstatusflags / dcontrolflags
  *   4. cuFileDriverClose() — clean shutdown
  *
  * Compile: nvcc -O2 -o 01-driver-init 01-driver-init.cu common/cufile_utils.cu -lcufile -lcuda
@@ -48,7 +48,7 @@ int main(void) {
     CUfileError_t status = cuFileDriverOpen();
     if (status.err != CU_FILE_SUCCESS) {
         fprintf(stderr, "ERROR: cuFileDriverOpen failed: %s (err=%d)\n",
-                cuFileGetErrorString(status), status.err);
+                CUFILE_ERRSTR(status.err), status.err);
         fprintf(stderr, "\nTroubleshooting:\n");
         fprintf(stderr, "  1. Is nvidia-fs module loaded? "
                 "→ lsmod | grep nvidia_fs\n");
@@ -66,47 +66,55 @@ int main(void) {
     if (status.err != CU_FILE_SUCCESS) {
         fprintf(stderr,
                 "ERROR: cuFileDriverGetProperties failed: %s\n",
-                cuFileGetErrorString(status));
+                CUFILE_ERRSTR(status.err));
         cuFileDriverClose();
         return EXIT_FAILURE;
     }
 
+    int nvme_ok = gds_nvme_supported(&props);
+    int p2p_ok  = gds_nvme_p2p_supported(&props);
+    int compat  = gds_compat_mode_allowed(&props);
+
     printf("=== Driver Properties ===\n");
-    printf("  API version:           v%d.%d\n",
-           props.major, props.minor);
-    printf("  GDS capable:           %s\n",
-           props.is_gds_capable ? "YES ✓" : "NO ✗");
-    printf("  GDS enabled:            %s\n",
-           props.is_gds_enabled ? "YES ✓" : "NO ✗");
+    printf("  nvfs version:          v%d.%d\n",
+           props.nvfs.major_version, props.nvfs.minor_version);
+    printf("  NVMe supported:         %s\n",
+           nvme_ok ? "YES ✓" : "NO ✗");
+    printf("  NVMe P2P DMA (GDS):     %s\n",
+           p2p_ok  ? "YES ✓" : "NO ✗");
+    printf("  Compat mode allowed:    %s\n",
+           compat  ? "YES" : "NO (hard errors on fallback)");
     printf("  Max direct IO size:    %s\n",
-           format_size(props.max_device_direct_io_size));
+           format_size(props.nvfs.max_direct_io_size));
     printf("  Max device cache:      %s\n",
            format_size(props.max_device_cache_size));
     printf("  Max pinned mem:        %s\n",
            props.max_device_pinned_mem_size == 0
                ? "unlimited"
                : format_size(props.max_device_pinned_mem_size));
+    printf("  Max batch IO size:     %u\n",
+           props.max_batch_io_size);
 
     /* ── Step 4: Interpret GDS status ────────────────────────── */
     printf("\n=== Status Assessment ===\n");
 
-    if (!props.is_gds_capable) {
-        printf("⚠️  GDS is NOT capable on this platform.\n");
+    if (!nvme_ok) {
+        printf("⚠️  NVMe not detected by nvidia-fs driver.\n");
         printf("   All I/O will use compatibility mode (CPU bounce buffer).\n");
         printf("\n   To enable GDS:\n");
         printf("   1. Run: gdscheck -p\n");
-        printf("   2. Verify GPU (SM ≥ 6.0) and NVMe on same PCIe root complex\n");
-        printf("   3. Check ACS is disabled for PCIe P2P\n");
-    } else if (!props.is_gds_enabled) {
-        printf("⚠️  GDS is CAPABLE but NOT enabled.\n");
-        printf("   Check:\n");
-        printf("   1. /etc/cufile.json → enable_compat_mode should be true\n");
-        printf("   2. Run: gdscheck -f <your-nvme-mountpoint>\n");
-        printf("   3. Filesystem must support O_DIRECT (ext4/xfs)\n");
+        printf("   2. Verify NVMe SSD is present and nvidia-fs is loaded\n");
+    } else if (!p2p_ok) {
+        printf("⚠️  NVMe detected but P2P DMA (GDS) NOT available.\n");
+        printf("   I/O will use compatibility mode (CPU bounce buffer).\n");
+        printf("\n   To enable GDS P2P:\n");
+        printf("   1. Verify GPU and NVMe on same PCIe root complex\n");
+        printf("   2. Check ACS is disabled for PCIe P2P\n");
+        printf("   3. Run: gdscheck -p\n");
     } else {
-        printf("✅ GDS is fully operational!\n");
-        printf("   Maximum throughput: up to %s per IO\n",
-               format_size(props.max_device_direct_io_size));
+        printf("✅ GDS NVMe P2P DMA is available!\n");
+        printf("   Maximum direct IO: %s per operation\n",
+               format_size(props.nvfs.max_direct_io_size));
     }
 
     /* ── Step 5: Cleanup ─────────────────────────────────────── */
@@ -114,8 +122,7 @@ int main(void) {
     status = cuFileDriverClose();
     if (status.err != CU_FILE_SUCCESS) {
         fprintf(stderr, "WARNING: cuFileDriverClose failed: %s\n",
-                cuFileGetErrorString(status));
-        /* Non-fatal — driver may recover */
+                CUFILE_ERRSTR(status.err));
     } else {
         printf("Driver closed successfully.\n");
     }

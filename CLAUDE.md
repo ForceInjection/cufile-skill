@@ -85,7 +85,7 @@ grep -r "Pascal\|Ampere\|Hopper\|PCIe Gen\|ACS\|P2P" references/
 
 ## When to Use This Skill vs Other Skills
 
-### ✅ Use cufile-skill when:
+### ✅ Use cufile-skill when
 
 - You need to move data directly between NVMe storage and GPU memory
 - You're writing/debugging applications that use the cuFile API (`cuFileRead`, `cuFileWrite`, etc.)
@@ -94,7 +94,7 @@ grep -r "Pascal\|Ampere\|Hopper\|PCIe Gen\|ACS\|P2P" references/
 - You're building GPU data pipelines, checkpoint/restore, or streaming ingest
 - You're diagnosing whether GDS is actually engaged
 
-### ❌ Do NOT use cufile-skill when:
+### ❌ Do NOT use cufile-skill when
 
 - **You need NVMe protocol-level programming** (PRP/SGL construction, doorbell registers, SQ/CQ management) — use the **`nvme-programming`** skill instead. cuFile abstracts NVMe details away; if you're writing an NVMe driver or using SPDK, this skill is the wrong layer.
 - **You're optimizing CUDA kernels or GPU compute** (thread block config, shared memory, Tensor Cores) — use the **`cuda-knowledge`** or **`cuda-optimizer`** skills. cuFile is about data movement, not kernel computation.

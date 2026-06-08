@@ -1,7 +1,8 @@
 /*
  * cufile_utils.cu — Shared helper implementations for cuFile examples
  *
- * Compile as part of each example or as a shared object.
+ * Based on cuFile API v1.13 (CUDA 12.8). Uses CUFILE_ERRSTR macro
+ * for error strings and nvfs.dstatusflags for GDS capability checks.
  */
 
 #include "cufile_utils.h"
@@ -18,28 +19,37 @@ int check_gds_available(void) {
 
     if (st.err != CU_FILE_SUCCESS) {
         fprintf(stderr, "ERROR: cuFileDriverGetProperties failed: %s\n",
-                cuFileGetErrorString(st));
+                CUFILE_ERRSTR(st.err));
         return -1;
     }
 
-    printf("=== GDS Driver Status ===\n");
-    printf("  Version:         v%d.%d\n", props.major, props.minor);
-    printf("  GDS capable:     %s\n", props.is_gds_capable ? "YES" : "NO");
-    printf("  GDS enabled:      %s\n", props.is_gds_enabled ? "YES" : "NO");
-    printf("  Max direct IO:   %s\n", format_size(props.max_device_direct_io_size));
-    printf("  Max device cache: %s\n", format_size(props.max_device_cache_size));
+    int nvme_ok  = gds_nvme_supported(&props);
+    int p2p_ok   = gds_nvme_p2p_supported(&props);
+    int compat   = gds_compat_mode_allowed(&props);
 
-    if (!props.is_gds_capable) {
-        printf("\n*** WARNING: GDS is NOT capable on this platform. ***\n");
-        printf("    Run 'gdscheck -p' to diagnose. IO will use compat mode.\n");
-    } else if (!props.is_gds_enabled) {
-        printf("\n*** WARNING: GDS capable but NOT enabled. ***\n");
-        printf("    Check /etc/cufile.json and nvidia-fs module.\n");
+    printf("=== GDS Driver Status ===\n");
+    printf("  nvfs version:    v%d.%d\n",
+           props.nvfs.major_version, props.nvfs.minor_version);
+    printf("  NVMe supported:  %s\n", nvme_ok ? "YES" : "NO");
+    printf("  NVMe P2P (GDS):  %s\n", p2p_ok  ? "YES" : "NO");
+    printf("  Compat mode:     %s\n", compat  ? "ALLOWED" : "DISABLED");
+    printf("  Max direct IO:   %s\n",
+           format_size(props.nvfs.max_direct_io_size));
+    printf("  Max device cache: %s\n",
+           format_size(props.max_device_cache_size));
+
+    if (!nvme_ok) {
+        printf("\n*** WARNING: NVMe not detected by nvidia-fs driver. ***\n");
+        printf("    Run 'gdscheck -p' to diagnose.\n");
+    } else if (!p2p_ok) {
+        printf("\n*** WARNING: NVMe P2P (GDS) NOT supported. ***\n");
+        printf("    Check PCIe topology: GPU+NVMe on same root complex, ACS disabled.\n");
+        printf("    I/O will use compatibility mode (CPU bounce buffer).\n");
     } else {
-        printf("\nGDS is fully operational.\n");
+        printf("\nNVMe P2P (GDS) is available.\n");
     }
 
-    return (props.is_gds_enabled) ? 0 : -1;
+    return (p2p_ok) ? 0 : -1;
 }
 
 /* ── Alignment Check ───────────────────────────────────────────── */
@@ -75,15 +85,16 @@ int check_alignment(const void *ptr, size_t size, off_t offset) {
 void cuFileCheck(CUfileError_t status, const char *operation) {
     if (status.err != CU_FILE_SUCCESS) {
         fprintf(stderr, "cuFile ERROR: %s failed: %s (err=%d)\n",
-                operation, cuFileGetErrorString(status), status.err);
+                operation, CUFILE_ERRSTR(status.err), status.err);
         exit(EXIT_FAILURE);
     }
 }
 
 void cuFileCheckIO(ssize_t ret, ssize_t expected, const char *operation) {
     if (ret < 0) {
-        fprintf(stderr, "cuFile IO ERROR: %s failed (ret=%zd)\n",
-                operation, ret);
+        int err_code = (int)(-ret);
+        fprintf(stderr, "cuFile IO ERROR: %s failed: %s (code=%d)\n",
+                operation, CUFILE_ERRSTR(err_code), err_code);
         exit(EXIT_FAILURE);
     }
     if (expected > 0 && ret != expected) {

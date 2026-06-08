@@ -1,10 +1,13 @@
 /*
  * cufile_utils.h — Shared helper functions for cuFile examples
  *
+ * Based on cuFile API v1.13 (CUDA 12.8). Key API differences from
+ * newer versions are documented in references/api-reference.md.
+ *
  * Provides:
- *   - check_gds_available(): Verify GDS driver status
+ *   - check_gds_available(): Verify GDS driver status via nvfs.dstatusflags
  *   - check_alignment(): Validate buffer and offset alignment
- *   - cuFileCheck(): Error-checking wrapper
+ *   - cuFileCheck(): Error-checking wrapper using CUFILE_ERRSTR
  *   - measure_bandwidth(): Simple throughput measurement
  *   - format_size(): Human-readable size formatting
  */
@@ -27,7 +30,10 @@ extern "C" {
 
 /**
  * Verify GDS driver status and print diagnostic information.
- * Returns 0 if GDS is fully operational, -1 otherwise.
+ * Returns 0 if NVMe P2P is supported, -1 otherwise.
+ *
+ * Uses nvfs.dstatusflags (CU_FILE_NVME_P2P_SUPPORTED bit 11)
+ * and nvfs.dcontrolflags (CU_FILE_ALLOW_COMPAT_MODE bit 1).
  */
 int check_gds_available(void);
 
@@ -43,6 +49,7 @@ int check_alignment(const void *ptr, size_t size, off_t offset);
 
 /**
  * Check cuFile error status and exit on failure.
+ * Uses CUFILE_ERRSTR macro for error string.
  */
 void cuFileCheck(CUfileError_t status, const char *operation);
 
@@ -77,6 +84,29 @@ int open_direct(const char *path, int flags, mode_t mode);
  * Pre-allocate a file to a specific size using ftruncate.
  */
 void preallocate_file(int fd, size_t size);
+
+/* ── GDS Diagnostic Helpers ────────────────────────────────────── */
+
+/**
+ * Check if NVMe P2P DMA is supported (bit 11 in nvfs.dstatusflags).
+ */
+static inline int gds_nvme_p2p_supported(const CUfileDrvProps_t *props) {
+    return (props->nvfs.dstatusflags & (1u << CU_FILE_NVME_P2P_SUPPORTED)) != 0;
+}
+
+/**
+ * Check if NVMe is supported (bit 4 in nvfs.dstatusflags).
+ */
+static inline int gds_nvme_supported(const CUfileDrvProps_t *props) {
+    return (props->nvfs.dstatusflags & (1u << CU_FILE_NVME_SUPPORTED)) != 0;
+}
+
+/**
+ * Check if compatibility mode is allowed (bit 1 in nvfs.dcontrolflags).
+ */
+static inline int gds_compat_mode_allowed(const CUfileDrvProps_t *props) {
+    return (props->nvfs.dcontrolflags & (1u << CU_FILE_ALLOW_COMPAT_MODE)) != 0;
+}
 
 #ifdef __cplusplus
 }
