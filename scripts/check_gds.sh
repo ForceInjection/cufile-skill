@@ -185,22 +185,49 @@ GPU_BDF_LIST=$(lspci 2>/dev/null | grep -i "VGA\|3D\|Display" | grep -i nvidia |
 NVME_BDF_LIST=$(lspci 2>/dev/null | grep "Non-Volatile" | awk '{print $1}' || true)
 
 if [ -n "$GPU_BDF_LIST" ] && [ -n "$NVME_BDF_LIST" ]; then
-    echo "       GPUs found:  $(echo $GPU_BDF_LIST | wc -w | tr -d ' ')"
-    echo "       NVMe found:  $(echo $NVME_BDF_LIST | wc -w | tr -d ' ')"
+    N_GPU=$(echo "$GPU_BDF_LIST" | wc -w | tr -d ' ')
+    N_NVME=$(echo "$NVME_BDF_LIST" | wc -w | tr -d ' ')
+    echo "       GPUs:  $N_GPU"
+    echo "       NVMe:  $N_NVME"
 
-    # For each GPU-NVMe pair, check if same PCIe root complex
-    for gpu_bdf in $GPU_BDF_LIST; do
-        GPU_ROOT=$(lspci -t -v 2>/dev/null | grep -B10 "$gpu_bdf" | grep "Root Complex" | tail -1 || echo "")
-        for nvme_bdf in $NVME_BDF_LIST; do
-            NVME_ROOT=$(lspci -t -v 2>/dev/null | grep -B10 "$nvme_bdf" | grep "Root Complex" | tail -1 || echo "")
-            if [ "$GPU_ROOT" = "$NVME_ROOT" ] && [ -n "$GPU_ROOT" ]; then
-                pass "GPU $gpu_bdf and NVMe $nvme_bdf: same root complex ✓"
-            else
-                warn "GPU $gpu_bdf and NVMe $nvme_bdf: may be on DIFFERENT root complexes" \
-                     "GDS requires GPU + NVMe on the same PCIe root complex. Verify with: lspci -t -v"
+    # Check topology: use /proc/driver/nvidia-fs/peer_distance if available
+    # (gives precise GPU↔NVMe P2P distance), otherwise use lspci root complex.
+    if [ -r /proc/driver/nvidia-fs/peer_distance ]; then
+        MATCHED=0
+        while read -r gpu_bdf peer_bdf rest; do
+            [ "$gpu_bdf" = "gpu" ] && continue  # skip header
+            gpu_short=$(echo "$gpu_bdf" | sed 's/0000://')
+            peer_short=$(echo "$peer_bdf" | sed 's/0000://')
+            if echo "$NVME_BDF_LIST" | grep -qw "$peer_short"; then
+                MATCHED=$((MATCHED + 1))
             fi
+        done < /proc/driver/nvidia-fs/peer_distance
+        if [ "$MATCHED" -gt 0 ]; then
+            pass "P2P-capable GPU↔NVMe pairs found: $MATCHED (via nvidia-fs peer_distance)"
+        else
+            warn "No GPU↔NVMe P2P pairs found in peer_distance" \
+                 "Check PCIe topology: GPU+NVMe must be on same root complex with ACS disabled"
+        fi
+    else
+        # Fallback: use lspci to count same-root-complex pairs
+        MATCHED=0
+        for gpu_bdf in $GPU_BDF_LIST; do
+            GPU_ROOT=$(lspci -t -v 2>/dev/null | grep -B10 "$gpu_bdf" | grep "Root Complex" | tail -1 || echo "")
+            [ -z "$GPU_ROOT" ] && continue
+            for nvme_bdf in $NVME_BDF_LIST; do
+                NVME_ROOT=$(lspci -t -v 2>/dev/null | grep -B10 "$nvme_bdf" | grep "Root Complex" | tail -1 || echo "")
+                if [ "$GPU_ROOT" = "$NVME_ROOT" ] && [ -n "$NVME_ROOT" ]; then
+                    MATCHED=$((MATCHED + 1))
+                fi
+            done
         done
-    done
+        if [ "$MATCHED" -gt 0 ]; then
+            pass "GPU↔NVMe same-root-complex pairs: $MATCHED"
+        else
+            warn "No GPU↔NVMe same-root-complex pairs detected" \
+                 "GDS requires GPU+NVMe on same PCIe root complex. Verify with: lspci -t -v"
+        fi
+    fi
 
     # ─── ACS (Access Control Services) Check ───
     echo ""
