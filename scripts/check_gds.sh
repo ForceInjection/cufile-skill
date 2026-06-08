@@ -87,30 +87,46 @@ echo ""
 
 echo "─── CUDA Toolkit ───"
 
-if check_cmd nvcc; then
-    NVCC_VER=$(nvcc --version | grep "release" | awk '{print $6}' | tr -d ',')
-    pass "nvcc available (version $NVCC_VER)"
+# Find nvcc: search CUDA toolkit paths (not just PATH)
+NVCC_BIN=""
+for cuda_base in /usr/local/cuda-* /usr/local/cuda /opt/cuda; do
+    if [ -x "$cuda_base/bin/nvcc" ]; then
+        NVCC_BIN="$cuda_base/bin/nvcc"
+        break
+    fi
+done
+# Also check PATH as fallback
+if [ -z "$NVCC_BIN" ]; then
+    NVCC_BIN=$(command -v nvcc 2>/dev/null || true)
+fi
 
-    CUDA_MAJOR=$(echo "$NVCC_VER" | cut -d. -f1)
-    if [ "$CUDA_MAJOR" -ge 12 ]; then
-        pass "CUDA $CUDA_MAJOR.x (≥ 11.4 required)"
-    elif [ "$CUDA_MAJOR" -ge 11 ]; then
-        warn "CUDA $CUDA_MAJOR.x (≥ 11.4 required, 12+ recommended)"
+if [ -n "$NVCC_BIN" ] && [ -x "$NVCC_BIN" ]; then
+    NVCC_VER=$("$NVCC_BIN" --version 2>/dev/null | grep "release" | awk '{print $6}' | tr -d ',' || true)
+    if [ -n "$NVCC_VER" ]; then
+        pass "nvcc found ($NVCC_BIN, version $NVCC_VER)"
+        CUDA_MAJOR=$(echo "${NVCC_VER:-0}" | cut -d. -f1)
+        if [ "${CUDA_MAJOR:-0}" -ge 12 ]; then
+            pass "CUDA ${CUDA_MAJOR}.x (≥ 11.4 required)"
+        elif [ "${CUDA_MAJOR:-0}" -ge 11 ]; then
+            warn "CUDA ${CUDA_MAJOR}.x (≥ 11.4 required, 12+ recommended)"
+        elif [ "${CUDA_MAJOR:-0}" -gt 0 ]; then
+            fail "CUDA ${CUDA_MAJOR}.x (< 11.4)" \
+                 "Install CUDA Toolkit 12.x from https://developer.nvidia.com/cuda-downloads"
+        fi
     else
-        fail "CUDA $CUDA_MAJOR.x (< 11.4)" \
-             "Install CUDA Toolkit 12.x from https://developer.nvidia.com/cuda-downloads"
+        warn "nvcc found at $NVCC_BIN but --version failed"
     fi
 else
-    fail "nvcc not found" \
+    fail "nvcc not found in PATH or /usr/local/cuda*" \
          "Install CUDA Toolkit from https://developer.nvidia.com/cuda-downloads"
 fi
 
-# Check for libcufile
-CUFILE_LIB=$(find /usr/local/cuda -name "libcufile*" 2>/dev/null | head -1)
+# Check for libcufile: search all CUDA paths
+CUFILE_LIB=$(find /usr/local/cuda* /opt/cuda* -name "libcufile*" 2>/dev/null | head -1 || true)
 if [ -n "$CUFILE_LIB" ]; then
     pass "libcufile found: $CUFILE_LIB"
 else
-    warn "libcufile not found in /usr/local/cuda" \
+    warn "libcufile not found" \
          "libcufile is bundled with CUDA Toolkit. Check CUDA installation."
 fi
 
@@ -194,34 +210,30 @@ if [ -n "$GPU_BDF_LIST" ] && [ -n "$NVME_BDF_LIST" ]; then
     echo ""
 
     ACS_ISSUE_FOUND=0
-    for bdf in $GPU_BDF_LIST $NVME_BDF_LIST; do
-        if [ -e "/sys/bus/pci/devices/0000:$bdf" ]; then
+    # ACS check requires root. Detect permission once; skip if unavailable.
+    FIRST_BDF=$(echo "$GPU_BDF_LIST" | awk '{print $1}')
+    HAVE_ACS_ACCESS=0
+    if [ -n "$FIRST_BDF" ] && [ -r "/sys/bus/pci/devices/0000:$FIRST_BDF/acs_ctrl" ]; then
+        HAVE_ACS_ACCESS=1
+    fi
+    if [ "$HAVE_ACS_ACCESS" -eq 0 ]; then
+        warn "ACS check requires root — skipping" \
+             "Re-run with: sudo bash $(basename "$0") $MOUNTPOINT"
+    else
+        for bdf in $GPU_BDF_LIST $NVME_BDF_LIST; do
             ACS_PATH="/sys/bus/pci/devices/0000:$bdf/acs_ctrl"
             if [ -r "$ACS_PATH" ]; then
-                ACS_VAL=$(cat "$ACS_PATH" 2>/dev/null)
-                if [ "$ACS_VAL" -gt 0 ] 2>/dev/null; then
+                ACS_VAL=$(cat "$ACS_PATH" 2>/dev/null || echo "0")
+                if [ "${ACS_VAL:-0}" -gt 0 ] 2>/dev/null; then
                     fail "ACS ENABLED on $bdf (acs_ctrl=$ACS_VAL)" \
                          "Disable ACS in BIOS or with kernel param: pci=disable_acs"
                     ACS_ISSUE_FOUND=1
                 else
-                    pass "ACS disabled on $bdf (acs_ctrl=$ACS_VAL)"
-                fi
-            else
-                # Fallback: check via lspci if /sys entry not available
-                ACS_LSPCI=$(lspci -vvv -s "$bdf" 2>/dev/null | grep "ACSCtl" || echo "")
-                if echo "$ACS_LSPCI" | grep -q "+"; then
-                    fail "ACS ENABLED on $bdf ($ACS_LSPCI)" \
-                         "Disable ACS in BIOS or with kernel param: pci=disable_acs"
-                    ACS_ISSUE_FOUND=1
-                elif echo "$ACS_LSPCI" | grep -q "-"; then
                     pass "ACS disabled on $bdf"
-                else
-                    warn "Cannot read ACS status for $bdf" \
-                         "Check manually: sudo lspci -vvv -s $bdf | grep ACSCtl"
                 fi
             fi
-        fi
-    done
+        done
+    fi
 
     if [ "$ACS_ISSUE_FOUND" -eq 1 ]; then
         echo ""
@@ -329,26 +341,23 @@ echo "─── Configuration ───"
 if [ -f /etc/cufile.json ]; then
     pass "/etc/cufile.json exists"
 
-    # Validate JSON
-    if python3 -m json.tool /etc/cufile.json > /dev/null 2>&1; then
-        pass "cufile.json is valid JSON"
-
-        # Check key settings
-        if python3 -c "
-import json
-with open('/etc/cufile.json') as f:
-    cfg = json.load(f)
-props = cfg.get('properties', {})
-print(props.get('enable_compat_mode', 'not set'))
-" 2>/dev/null | grep -q "True\|true"; then
+    # Check key settings (cufile.json may use non-standard JSON with comments;
+    # use grep as a tolerant parser rather than strict python3 -m json.tool)
+    if grep -q '"enable_compat_mode"' /etc/cufile.json 2>/dev/null; then
+        if grep '"enable_compat_mode"' /etc/cufile.json 2>/dev/null | grep -q 'true\|1'; then
             echo "       Compat mode: ENABLED"
-        else
-            warn "Compat mode may be disabled" \
+        elif grep '"enable_compat_mode"' /etc/cufile.json 2>/dev/null | grep -q 'false\|0'; then
+            warn "Compat mode is DISABLED (hard errors on GDS fallback)" \
                  "Set enable_compat_mode: true in /etc/cufile.json for production"
         fi
+    fi
+
+    # Try strict JSON validation as a bonus check (non-fatal)
+    if python3 -m json.tool /etc/cufile.json > /dev/null 2>&1; then
+        pass "cufile.json is valid strict JSON"
     else
-        fail "cufile.json is INVALID JSON" \
-             "Fix syntax errors in /etc/cufile.json"
+        warn "cufile.json is not valid strict JSON (may contain comments or trailing commas)" \
+             "This is usually fine — cuFile accepts non-standard JSON. Verify with gdscheck."
     fi
 else
     warn "/etc/cufile.json not found" \
