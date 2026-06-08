@@ -62,7 +62,8 @@ int main(int argc, char *argv[]) {
     int fd = open_direct(file_path, O_CREAT | O_RDWR, 0644);
     preallocate_file(fd, TEST_SIZE);
 
-    CUfileDescr_t descr = {0};
+    CUfileDescr_t descr;
+    memset(&descr, 0, sizeof(descr));
     descr.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
     descr.handle.fd = fd;
     CUfileHandle_t fh;

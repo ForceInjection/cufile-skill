@@ -16,6 +16,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <errno.h>
 #include <cufile.h>
 #include <cuda_runtime.h>
 #include "common/cufile_utils.h"
