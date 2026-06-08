@@ -21,9 +21,12 @@ NVIDIA cuFile / GPUDirect Storage (GDS) 高性能编程 Agent Skill。
 ├── SKILL.md              # 主技能文件 (Claude Code 加载)
 ├── CLAUDE.md             # AI Agent 指导文件
 ├── README.md             # 本文件
-├── references/           # 13 个深入参考文件（按需加载）
-├── examples/             # 6 个可编译的 CUDA C 示例
-└── scripts/              # GDS 环境检测脚本
+├── CHANGELOG.md          # 版本历史
+├── .gitignore
+├── assets/               # 静态资源
+├── references/           # 14 个深入参考文件（按需加载）
+├── examples/             # 6 个可编译的 CUDA C 示例 + 公共工具函数
+└── scripts/              # GDS 环境检测脚本（含 PCIe ACS 检查）
 ```
 
 ## 前置条件
