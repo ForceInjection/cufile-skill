@@ -91,6 +91,7 @@ void preallocate_file(int fd, size_t size);
  * Check if NVMe P2P DMA is supported (bit 11 in nvfs.dstatusflags).
  */
 static inline int gds_nvme_p2p_supported(const CUfileDrvProps_t *props) {
+    if (!props) return 0;
     return (props->nvfs.dstatusflags & (1u << CU_FILE_NVME_P2P_SUPPORTED)) != 0;
 }
 
@@ -98,6 +99,7 @@ static inline int gds_nvme_p2p_supported(const CUfileDrvProps_t *props) {
  * Check if NVMe is supported (bit 4 in nvfs.dstatusflags).
  */
 static inline int gds_nvme_supported(const CUfileDrvProps_t *props) {
+    if (!props) return 0;
     return (props->nvfs.dstatusflags & (1u << CU_FILE_NVME_SUPPORTED)) != 0;
 }
 
@@ -105,6 +107,7 @@ static inline int gds_nvme_supported(const CUfileDrvProps_t *props) {
  * Check if compatibility mode is allowed (bit 1 in nvfs.dcontrolflags).
  */
 static inline int gds_compat_mode_allowed(const CUfileDrvProps_t *props) {
+    if (!props) return 0;
     return (props->nvfs.dcontrolflags & (1u << CU_FILE_ALLOW_COMPAT_MODE)) != 0;
 }
 

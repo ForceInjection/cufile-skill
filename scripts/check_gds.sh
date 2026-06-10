@@ -89,12 +89,19 @@ echo "─── CUDA Toolkit ───"
 
 # Find nvcc: search CUDA toolkit paths (not just PATH)
 NVCC_BIN=""
-for cuda_base in /usr/local/cuda-* /usr/local/cuda /opt/cuda; do
-    if [ -x "$cuda_base/bin/nvcc" ]; then
-        NVCC_BIN="$cuda_base/bin/nvcc"
-        break
-    fi
-done
+# Prefer CUDA_HOME or the default symlink, then fall back to glob
+if [ -n "${CUDA_HOME:-}" ] && [ -x "$CUDA_HOME/bin/nvcc" ]; then
+    NVCC_BIN="$CUDA_HOME/bin/nvcc"
+elif [ -x /usr/local/cuda/bin/nvcc ]; then
+    NVCC_BIN=/usr/local/cuda/bin/nvcc
+else
+    for cuda_base in /usr/local/cuda-* /opt/cuda; do
+        if [ -x "$cuda_base/bin/nvcc" ]; then
+            NVCC_BIN="$cuda_base/bin/nvcc"
+            break
+        fi
+    done
+fi
 # Also check PATH as fallback
 if [ -z "$NVCC_BIN" ]; then
     NVCC_BIN=$(command -v nvcc 2>/dev/null || true)
@@ -196,8 +203,8 @@ if [ -n "$GPU_BDF_LIST" ] && [ -n "$NVME_BDF_LIST" ]; then
         MATCHED=0
         while read -r gpu_bdf peer_bdf rest; do
             [ "$gpu_bdf" = "gpu" ] && continue  # skip header
-            gpu_short=$(echo "$gpu_bdf" | sed 's/0000://')
-            peer_short=$(echo "$peer_bdf" | sed 's/0000://')
+            gpu_short=$(echo "$gpu_bdf" | sed 's/^[0-9a-f]\{4\}://')
+            peer_short=$(echo "$peer_bdf" | sed 's/^[0-9a-f]\{4\}://')
             if echo "$NVME_BDF_LIST" | grep -qw "$peer_short"; then
                 MATCHED=$((MATCHED + 1))
             fi
@@ -371,9 +378,9 @@ if [ -f /etc/cufile.json ]; then
     # Check key settings (cufile.json may use non-standard JSON with comments;
     # use grep as a tolerant parser rather than strict python3 -m json.tool)
     if grep -q '"enable_compat_mode"' /etc/cufile.json 2>/dev/null; then
-        if grep '"enable_compat_mode"' /etc/cufile.json 2>/dev/null | grep -q 'true\|1'; then
+        if grep '"enable_compat_mode"' /etc/cufile.json 2>/dev/null | grep -qE ':\s*(true|1)'; then
             echo "       Compat mode: ENABLED"
-        elif grep '"enable_compat_mode"' /etc/cufile.json 2>/dev/null | grep -q 'false\|0'; then
+        elif grep '"enable_compat_mode"' /etc/cufile.json 2>/dev/null | grep -qE ':\s*(false|0)'; then
             warn "Compat mode is DISABLED (hard errors on GDS fallback)" \
                  "Set enable_compat_mode: true in /etc/cufile.json for production"
         fi
